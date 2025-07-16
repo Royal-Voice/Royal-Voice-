@@ -1,128 +1,157 @@
-Royal-Voice-studio 
+Royal-Voice-All-In-One-studio
 import gradio as gr
-import uuid
 import os
+import uuid
+import json
 from pydub import AudioSegment
 import librosa
 import soundfile as sf
 import numpy as np
+from transformers import pipeline
 
-# --- USER SYSTEM ---
-users = {"admin": "admin123"}
-sessions = {}
+# === File-based user storage ===
+USERS_FILE = "users.json"
+if not os.path.exists(USERS_FILE):
+    with open(USERS_FILE, "w") as f:
+        json.dump({}, f)
+
+def load_users():
+    with open(USERS_FILE, "r") as f:
+        return json.load(f)
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
+
+# === Signup & Login ===
+def signup(username, password):
+    users = load_users()
+    if username in users:
+        return "❌ Username already exists."
+    users[username] = {"password": password, "tracks": []}
+    save_users(users)
+    return "✅ Signup successful!"
 
 def login(username, password):
-    if users.get(username) == password:
+    users = load_users()
+    if username in users and users[username]["password"] == password:
         token = str(uuid.uuid4())
-        sessions[token] = username
-        return f"✅ Login successful. Token: {token}"
+        users[username]["token"] = token
+        save_users(users)
+        return token
     return "❌ Invalid credentials"
 
-# --- AI AUTOTUNE ---
-def autotune(audio_file):
+# === Multitrack merging ===
+def merge_tracks(t1, t2, t3, t4):
+    files = [t1, t2, t3, t4]
+    audio_segments = []
+
+    for f in files:
+        if f:
+            audio = AudioSegment.from_file(f)
+            audio_segments.append(audio)
+
+    if not audio_segments:
+        return None, "⚠️ No audio provided."
+
+    merged = audio_segments[0]
+    for seg in audio_segments[1:]:
+        merged = merged.overlay(seg)
+
+    out_path = "merged_output.wav"
+    merged.export(out_path, format="wav")
+    return out_path, "✅ Tracks merged successfully."
+
+# === AI AutoTune ===
+def autotune(input_audio):
     try:
-        y, sr = librosa.load(audio_file)
-        y_tuned = librosa.effects.pitch_shift(y, sr, n_steps=2)
-        output_file = "autotuned.wav"
-        sf.write(output_file, y_tuned, sr)
-        return output_file
+        y, sr = librosa.load(input_audio)
+        pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
+        pitch_vals = np.max(pitches, axis=0)
+        est_pitch = np.mean(pitch_vals[pitch_vals > 0])
+        if np.isnan(est_pitch) or est_pitch == 0:
+            return input_audio, "⚠️ Pitch not detected."
+        return input_audio, f"🎵 Estimated pitch: {round(est_pitch, 2)} Hz"
     except Exception as e:
-        return None
+        return input_audio, f"❌ Error: {str(e)}"
 
-# --- MULTITRACK MIXING ---
-def apply_effects(track1, track2, track3, track4, fx, eq_level):
+# === Music from Lyrics using GPT-2 ===
+generator = pipeline("text-generation", model="gpt2")
+
+def generate_music_from_lyrics(lyrics):
     try:
-        combined = None
-        tracks = [track1, track2, track3, track4]
-
-        for t in tracks:
-            if t is not None:
-                audio = AudioSegment.from_file(t)
-                if fx == "Reverb":
-                    audio = audio + 5
-                elif fx == "Echo":
-                    audio = audio.overlay(audio, delay=200)
-                if eq_level > 50:
-                    audio = audio.high_pass_filter(300)
-                combined = audio if combined is None else combined.overlay(audio)
-
-        if combined:
-            out_path = "mixed_output.wav"
-            combined.export(out_path, format="wav")
-            return out_path, f"✅ Mixed with {fx}, EQ: {eq_level}%"
-        return None, "⚠️ Please upload at least one track."
+        result = generator(f"Write a music idea based on: {lyrics}", max_length=100)
+        return result[0]['generated_text']
     except Exception as e:
-        return None, "❌ Error during mixing."
+        return f"❌ Error generating: {str(e)}"
 
-# --- EXPORT FILE ---
-def export_file(audio_file, fmt):
-    try:
-        audio = AudioSegment.from_file(audio_file)
-        out_path = f"exported.{fmt}"
-        audio.export(out_path, format=fmt)
-        return out_path, f"✅ Exported as .{fmt}"
-    except Exception as e:
-        return None, "❌ Export failed."
+# === Save to user's track list ===
+def save_track(username, audio_file):
+    users = load_users()
+    if username in users:
+        users[username]["tracks"].append(audio_file)
+        save_users(users)
+        return "✅ Track saved to user account."
+    return "❌ User not found."
 
-# --- GENERATE MELODY (MOCK) ---
-def generate_music(lyrics):
-    return f"🎶 AI-generated melody for: '{lyrics[:100]}...'"
+# === Gradio Interface ===
+with gr.Blocks(title="Royal Voice AI Studio") as app:
+    gr.Markdown("# 🎧 Royal Voice AI Studio\n_Free AI Music Studio with Multitrack Mixing, AutoTune, and Lyric Generation_")
 
+    with gr.Tab("🔐 Sign Up / Login"):
+        with gr.Row():
+            user = gr.Textbox(label="Username")
+            pw = gr.Textbox(label="Password", type="password")
+        signup_btn = gr.Button("Sign Up")
+        login_btn = gr.Button("Log In")
+        session_token = gr.Textbox(label="Session Token")
 
-# === GRADIO UI ===
-with gr.Blocks(title="Royal Voice Studio") as demo:
-    gr.Markdown("# 🎵 Royal Voice Studio 🎤")
-    gr.Markdown("Free AI-powered music production tool")
+        signup_btn.click(signup, inputs=[user, pw], outputs=session_token)
+        login_btn.click(login, inputs=[user, pw], outputs=session_token)
 
-    with gr.Tab("🔐 Login"):
-        username = gr.Textbox(label="Username")
-        password = gr.Textbox(label="Password", type="password")
-        login_btn = gr.Button("Login")
-        login_result = gr.Textbox(label="Result")
-        login_btn.click(fn=login, inputs=[username, password], outputs=login_result)
-
-    with gr.Tab("🎛️ Multitrack Mixing"):
-        gr.Markdown("Upload up to 4 tracks and apply effects")
+    with gr.Tab("🎧 Merge Tracks"):
         track1 = gr.Audio(label="Track 1", type="filepath")
         track2 = gr.Audio(label="Track 2", type="filepath")
         track3 = gr.Audio(label="Track 3", type="filepath")
         track4 = gr.Audio(label="Track 4", type="filepath")
-        fx = gr.Dropdown(["None", "Reverb", "Echo"], label="Effect")
-        eq = gr.Slider(0, 100, value=50, label="EQ Level")
-        mix_btn = gr.Button("Mix Tracks")
-        mix_result = gr.Audio(label="Mixed Output")
-        mix_msg = gr.Textbox(label="Message")
-        mix_btn.click(fn=apply_effects, inputs=[track1, track2, track3, track4, fx, eq], outputs=[mix_result, mix_msg])
+        merge_btn = gr.Button("Merge Tracks")
+        merged_output = gr.Audio(label="Merged Output")
+        merge_msg = gr.Textbox()
 
-    with gr.Tab("🎤 AI AutoTune"):
-        vocal = gr.Audio(label="Upload Raw Vocal", type="filepath")
-        tune_btn = gr.Button("Apply AutoTune")
-        tuned_result = gr.Audio(label="Tuned Output")
-        tune_btn.click(fn=autotune, inputs=vocal, outputs=tuned_result)
+        merge_btn.click(merge_tracks, [track1, track2, track3, track4], [merged_output, merge_msg])
 
-    with gr.Tab("🎶 Generate Music from Lyrics"):
-        lyrics = gr.Textbox(label="Lyrics")
-        gen_btn = gr.Button("Generate")
-        gen_result = gr.Textbox(label="AI Melody")
-        gen_btn.click(fn=generate_music, inputs=lyrics, outputs=gen_result)
+    with gr.Tab("🎚️ AutoTune"):
+        autotune_input = gr.Audio(label="Upload Vocal", type="filepath")
+        autotune_btn = gr.Button("AutoTune")
+        autotune_output = gr.Audio(label="AutoTuned Output")
+        autotune_text = gr.Textbox()
 
-    with gr.Tab("📤 Export"):
-        export_fmt = gr.Dropdown(["mp3", "wav", "ogg"], label="Format")
-        export_btn = gr.Button("Export Final Audio")
-        export_result = gr.Audio(label="Exported Audio")
-        export_msg = gr.Textbox(label="Status")
-        export_btn.click(fn=export_file, inputs=[mix_result, export_fmt], outputs=[export_result, export_msg])
+        autotune_btn.click(autotune, [autotune_input], [autotune_output, autotune_text])
 
-    with gr.Tab("📱 PWA Install"):
-        gr.Markdown("To install this app on mobile:\n- Tap the browser menu\n- Choose 'Add to Home Screen'")
+    with gr.Tab("🎼 Generate from Lyrics"):
+        lyrics_input = gr.Textbox(lines=4, placeholder="Write your lyrics or idea here...")
+        lyrics_btn = gr.Button("Generate Song Idea")
+        lyrics_output = gr.Textbox(lines=6)
 
-demo.launch()
+        lyrics_btn.click(generate_music_from_lyrics, [lyrics_input], lyrics_output)
+
+    with gr.Tab("☁️ Save Track"):
+        save_user = gr.Textbox(label="Username")
+        save_btn = gr.Button("Save Current Track")
+        save_status = gr.Textbox()
+        save_btn.click(save_track, [save_user, merged_output], save_status)
+
+app.launch()
 gradio
 pydub
 librosa
 soundfile
-numpy
+transformers
+torch
 scipy
-python app.py
-app.py
-requirements.txt
+numpy
+RoyalVoice/
+│
+├── app.py
+├── requirements.txt
+├── users.json   ← will be created at runtime
